@@ -7,136 +7,140 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-zookeeper/zk"
 )
 
-//Power by  Egor Kovalchuk
+// Power by  Egor Kovalchuk
 
 const (
 	// логи
-	logFileName     = "compare.log"
-	versionutil     = "0.0.1"
-	CompareFileName = "rez.log"
+	logFileName = "compare.log"
+	versionutil = "0.0.2"
 )
 
 var (
-	//Запись в лог
+	// Запись в лог
 	filer *os.File
-	//Запись в лог
+	// Запись в лог
 	rezfiler *os.File
-	//запрос помощи
+	// запрос помощи
 	help bool
-	//ошибки
+	// ошибки
 	err error
-	//запрос версии
+	// запрос версии
 	version bool
-	//Источник zk
+	// Источник zk
 	sourcezk string
-	//c чем сравниваем zk
+	// c чем сравниваем zk
 	dstzk string
-	//исключение
+	// исключение
 	excl  string
 	excla []string
-	//старт пути
+	// старт пути
 	pathzk    string
 	srczkcon  *zk.Conn
 	destzkcon *zk.Conn
+
+	// Строка поиска
+	find string
+	// Дебаг режим
+	debugm bool
+
+	wg sync.WaitGroup
 )
 
 func main() {
 	//start program
-	filer, err = os.OpenFile(logFileName, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0666)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.SetOutput(filer)
-	log.Println("- - - - - - - - - - - - - - -")
-	log.Println("Start report")
-
-	flag.BoolVar(&version, "v", false, "a bool")
-	flag.BoolVar(&help, "h", false, "a bool")
-	flag.StringVar(&sourcezk, "s", "", "Source Zookeeper is not empty")
-	flag.StringVar(&dstzk, "d", "", "Destination Zookeeper is not empty")
-	flag.StringVar(&pathzk, "p", "", "Path Zookeeper is not empty")
-	flag.StringVar(&excl, "e", "", "")
-	flag.Parse()
-
-	if version {
-		fmt.Println("Version utill " + versionutil)
-		return
-	}
-
-	if help {
+	var argument string
+	if len(os.Args) > 1 {
+		argument = os.Args[1]
+	} else {
 		Helpstart()
 		return
 	}
 
-	if sourcezk == "" || pathzk == "" || dstzk == "" {
-		fmt.Println("Use go-zkcompare -s source_zk -d dest_zk -p start_path")
+	if argument == "-h" {
+		Helpstart()
+		return
+	} else if argument == "-v" {
+		fmt.Println("Version utill " + versionutil)
 		return
 	}
 
-	excla = strings.Split(excl, ",")
+	flag.StringVar(&sourcezk, "s", "", "Source Zookeeper is not empty")
+	flag.StringVar(&dstzk, "d", "", "Destination Zookeeper is not empty")
+	flag.StringVar(&pathzk, "p", "/", "Path Zookeeper, default /")
+	flag.BoolVar(&debugm, "debug", false, "Debug mode")
+	flag.StringVar(&excl, "e", "password", "exlude tags")
+	flag.StringVar(&find, "f", "", "find string")
+	flag.Parse()
 
-	rezfiler, err = os.OpenFile(CompareFileName, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0666)
-
+	// Открытие лог файла
+	// ротация не поддерживается в текущей версии
+	// Вынести в горутину
+	filer, err := os.OpenFile(logFileName, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	srczkcon, _, err = zk.Connect([]string{sourcezk}, time.Second) //*10)
-	if err != nil {
-		panic(err)
-	}
-
-	destzkcon, _, err = zk.Connect([]string{dstzk}, time.Second) //*10)
-	if err != nil {
-		panic(err)
-	}
-
-	children, _, err := srczkcon.Children(pathzk)
-	if err != nil {
-		panic(err)
-	} else {
-		ReChildren(children, pathzk)
-	}
-
-	defer rezfiler.Close()
 	defer filer.Close()
 
+	log.SetOutput(filer)
+
+	// запуск горутины записи в лог
+	go LogWriteForGoRutineStruct(LogChannel)
+
+	ProcessInfo("- - - - - - - - - - - - - - -")
+	ProcessInfo("Start report")
+
+	if find != "" && sourcezk != "" {
+		FindStart()
+		return
+	} else {
+		CompareStart()
+		return
+	}
 }
 
 func ReChildren(chdl []string, pthzk string) {
+	defer wg.Done()
 	for _, i := range chdl {
 		if !CompareZk(i) {
 			tmp := pthzk + "/" + i
-			log.Println("Check " + tmp)
+			ProcessDebug("Check " + tmp)
 
 			sgg, _, err := srczkcon.Get(tmp)
 			if len(sgg) > 1 {
-				log.Println(string(sgg))
+				ProcessDebug(string(sgg))
 			}
 
 			dgg, _, err := destzkcon.Get(tmp)
 
 			if !bytes.Equal(sgg, dgg) {
-				rezfiler.WriteString(tmp + "\n")
-				rezfiler.WriteString("source :" + string(sgg) + " destination: " + string(dgg) + "\n")
+				if len(sgg) > 30 && len(dgg) > 30 {
+					ProcessWarm("source :" + string(tmp) + " value: ***(big value) ")
+				} else {
+					ProcessWarm("source :" + string(tmp) + " value: " + Cut(sgg) + " value destination: " + Cut(dgg))
+				}
 			}
 
 			//Идем дальше
 			children, _, err := srczkcon.Children(tmp)
 			if err != nil {
-				log.Println(err)
+				ProcessError(err)
 			} else {
-				ReChildren(children, tmp)
+				wg.Add(1)
+				go ReChildren(children, tmp)
 			}
+		} else {
+			ProcessInfo("Skeep: " + i)
 		}
 	}
 }
 
+// Исключение полей из строки запуска
 func CompareZk(pth string) bool {
 	check := false
 	for _, i := range excla {
@@ -147,8 +151,92 @@ func CompareZk(pth string) bool {
 	return check
 }
 
-func Helpstart() {
-	fmt.Println("Start utill")
-	fmt.Println("go-zkcompare -s source_zk -d dest_zk -p start_path -e excludetag1,excludetag2")
-	fmt.Println("Use -v get version")
+func CompareStart() {
+	if sourcezk == "" || pathzk == "" || dstzk == "" {
+		fmt.Println("Use go-zkcompare -s source_zk -d dest_zk -p start_path")
+		return
+	}
+
+	excla = strings.Split(excl, ",")
+
+	srczkcon, _, err = zk.Connect([]string{sourcezk}, time.Second*10)
+	if err != nil {
+		ProcessPanic(err)
+	}
+
+	destzkcon, _, err = zk.Connect([]string{dstzk}, time.Second*10)
+	if err != nil {
+		ProcessPanic(err)
+	}
+
+	children, _, err := srczkcon.Children(pathzk)
+	if err != nil {
+		ProcessPanic(err)
+	} else {
+		wg.Add(1)
+		go ReChildren(children, pathzk)
+	}
+
+	wg.Wait() // Ожидаем завершения всех горутин
+	ProcessInfo("Stop find")
+	sleep(2 * time.Second)
+}
+
+func FindStart() {
+	ProcessInfo("Start find")
+	srczkcon, _, err = zk.Connect([]string{sourcezk}, time.Second*10)
+
+	if err != nil {
+		ProcessPanic(err)
+	}
+
+	children, _, err := srczkcon.Children(pathzk)
+
+	if err != nil {
+		ProcessPanic(err)
+	} else {
+		wg.Add(1)
+		go ReChildrenFind(children, pathzk)
+	}
+
+	wg.Wait() // Ожидаем завершения всех горутин
+	ProcessInfo("Stop find")
+	sleep(2 * time.Second)
+}
+
+func ReChildrenFind(chdl []string, pthzk string) {
+	defer wg.Done()
+	for _, i := range chdl {
+
+		tmp := pthzk + "/" + i
+
+		sgg, _, err := srczkcon.Get(tmp)
+		if len(sgg) > 1 {
+			ProcessDebug(string(tmp))
+		}
+
+		if strings.Contains(string(sgg), find) {
+			ProcessInfo("source :" + string(tmp) + " value: " + Cut(sgg))
+		}
+
+		//Идем дальше
+		children, _, err := srczkcon.Children(tmp)
+		if err != nil {
+			ProcessError(err)
+		} else {
+			wg.Add(1)
+			go ReChildrenFind(children, tmp)
+		}
+
+	}
+
+}
+
+// Обрезка строки
+func Cut(w []byte) string {
+	if len(w) > 20 {
+		return string(w[:20])
+	} else {
+		return string(w)
+	}
 }
