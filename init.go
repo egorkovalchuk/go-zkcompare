@@ -2,10 +2,15 @@ package main
 
 import (
 	"fmt"
-
 	"log"
 	"os"
 	"time"
+)
+
+const (
+	configname = "config.json"
+	// логи
+	logFileName = "compare.log"
 )
 
 type LogStruct struct {
@@ -15,23 +20,29 @@ type LogStruct struct {
 
 var (
 	LogChannel = make(chan LogStruct)
+	// Запись в лог
+	filer  *os.File
+	logger *log.Logger
 )
 
 // Запись ошибок из горутин
 // можно добавить ротейт по дате + архив в отдельном потоке
-func LogWriteForGoRutineStruct(err chan LogStruct) {
-	for i := range err {
-		datetime := time.Now().Local().Format("2006/01/02 15:04:05")
-		log.SetPrefix(datetime + " " + i.t + ": ")
-		log.SetFlags(0)
-		log.Println(i.text)
-		log.SetPrefix("")
-		log.SetFlags(log.Ldate | log.Ltime)
+func LogWriteForGoRutineStruct(logs chan LogStruct) {
+	filer, err := os.OpenFile(logFileName, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer filer.Close()
+	logger = log.New(filer, "", 0)
+
+	for entry := range logs {
+		prefix := time.Now().Local().Format("2006/01/02 15:04:05") + " " + entry.t + ": "
+		logger.SetPrefix(prefix)
+		logger.Println(entry.text)
 	}
 }
 
 // Запись в лог при включенном дебаге
-// Сделать горутиной?
 func ProcessDebug(logtext interface{}) {
 	if debugm {
 		LogChannel <- LogStruct{"DEBUG", logtext}
@@ -76,6 +87,18 @@ func ProcessInflux(logtext interface{}) {
 func ProcessPanic(logtext interface{}) {
 	fmt.Println(logtext)
 	os.Exit(2)
+}
+
+// Запись в лог
+func ProcessLog(level string, logtext interface{}) {
+	switch level {
+	case "DEBUG":
+		ProcessDebug(logtext)
+	case "PANIC":
+		ProcessPanic(logtext)
+	default:
+		LogChannel <- LogStruct{level, logtext}
+	}
 }
 
 // Инициализация переменных

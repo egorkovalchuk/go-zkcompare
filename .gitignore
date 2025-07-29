@@ -1,1 +1,6 @@
-/compare.log
+compare.log
+config.json
+*.log
+*.json
+*.exe
+
