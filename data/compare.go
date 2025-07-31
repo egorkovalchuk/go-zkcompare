@@ -3,7 +3,6 @@ package data
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,8 +15,10 @@ type CompareStruct struct {
 	sourcezk string
 	pathzk   string
 	dstzk    string
-	logFunc  func(string, interface{})
-	excla    []string
+	logFunc  *LogWriter
+	// список исключений
+	excla []string
+	// список включений
 	include  []string
 	srczkcon *zk.Conn
 	dstzkcon *zk.Conn
@@ -27,23 +28,21 @@ type CompareStruct struct {
 	wg sync.WaitGroup
 	// Ограничение поиска
 	// на пример empty. только поиск пустых
-	tag string
+	only string
 	// вывод равных параметров
 	printskeep bool
-	logger     *log.Logger
 }
 
-func NewCompare(sourcezk string, dstzk string, pthzk string, logFunc func(string, interface{}), excla []string, tag string, printskeep bool, logger *log.Logger, include []string) *CompareStruct {
+func NewCompare(sourcezk string, dstzk string, pthzk string, logFunc *LogWriter, excla []string, only string, printskeep bool, include []string) *CompareStruct {
 	return &CompareStruct{
 		sourcezk:   sourcezk,
 		pathzk:     pthzk,
 		dstzk:      dstzk,
 		logFunc:    logFunc,
 		excla:      excla,
-		tag:        tag,
+		only:       only,
 		printskeep: printskeep,
 		zkcount:    NewCounters(),
-		logger:     logger,
 		include:    include,
 	}
 }
@@ -55,28 +54,28 @@ func (c *CompareStruct) CompareStart() {
 	}
 
 	var err error
-	zkLogger := zkLoggerAdapter{logger: c.logger}
+	zkLogger := zkLoggerAdapter{logger: c.logFunc.GetLogger()}
 	c.srczkcon, _, err = zk.Connect([]string{c.sourcezk}, time.Second*10, zk.WithLogger(&zkLogger))
 	if err != nil {
-		c.logFunc("PANIC", err)
+		c.logFunc.ProcessPanic(err)
 	}
 	c.dstzkcon, _, err = zk.Connect([]string{c.dstzk}, time.Second*10, zk.WithLogger(&zkLogger))
 	if err != nil {
-		c.logFunc("PANIC", err)
+		c.logFunc.ProcessPanic(err)
 	}
 
 	// Добавить %
 
 	children, _, err := c.srczkcon.Children(c.pathzk)
 	if err != nil {
-		c.logFunc("PANIC", err)
+		c.logFunc.ProcessPanic(err)
 	} else {
 		c.wg.Add(1)
 		go c.ReChildren(children, c.pathzk)
 	}
 
 	c.wg.Wait() // Ожидаем завершения всех горутин
-	c.logFunc("INFO", "Stop compare")
+	c.logFunc.ProcessInfo("Stop compare")
 	for k, v := range c.zkcount.LoadRange() {
 		c.ProcessInfo(k + ": " + strconv.Itoa(v))
 	}
@@ -88,30 +87,30 @@ func (c *CompareStruct) ReChildren(chdl []string, pthzk string) {
 	for _, i := range chdl {
 		if !c.CompareZk(i) {
 			tmp := pthzk + "/" + i
-			c.logFunc("DEBUG", "Check "+tmp)
+			c.logFunc.ProcessDebug("Check " + tmp)
 
 			sgg, _, err := c.srczkcon.Get(tmp)
 			if len(sgg) > 1 {
-				c.logFunc("DEBUG", string(sgg))
+				c.logFunc.ProcessDebug(string(sgg))
 			}
 
 			dgg, _, err := c.dstzkcon.Get(tmp)
 
 			if !bytes.Equal(sgg, dgg) {
 				switch {
-				case c.tag == "empty":
+				case c.only == "empty":
 					if len(dgg) == 0 {
-						c.logFunc("WARM", "source :"+string(tmp)+" value destination empty")
+						c.logFunc.ProcessWarm("source :" + string(tmp) + " value destination empty")
 						c.zkcount.Inc("EMPTY")
 					}
 				case len(sgg) > 30 && len(dgg) > 30:
-					c.logFunc("WARM", "source :"+string(tmp)+" value: ***(big value) ")
+					c.logFunc.ProcessWarm("source :" + string(tmp) + " value: ***(big value) ")
 					c.zkcount.Inc("UNEQUAL BIG")
 				case len(dgg) == 0:
-					c.logFunc("WARM", "source :"+string(tmp)+" value destination empty")
+					c.logFunc.ProcessWarm("source :" + string(tmp) + " value destination empty")
 					c.zkcount.Inc("EMPTY")
 				default:
-					c.logFunc("WARM", "source :"+string(tmp)+" value: "+Cut(sgg)+" value destination: "+Cut(dgg))
+					c.logFunc.ProcessWarm("source :" + string(tmp) + " value: " + Cut(sgg) + " value destination: " + Cut(dgg))
 					c.zkcount.Inc("UNEQUAL")
 				}
 			} else {
@@ -121,14 +120,14 @@ func (c *CompareStruct) ReChildren(chdl []string, pthzk string) {
 			//Идем дальше
 			children, _, err := c.srczkcon.Children(tmp)
 			if err != nil {
-				c.logFunc("ERROR", err)
+				c.logFunc.ProcessError(err)
 			} else {
 				c.wg.Add(1)
 				go c.ReChildren(children, tmp)
 			}
 		} else {
 			if c.printskeep {
-				c.logFunc("INFO", "Skeep: "+pthzk+"/"+i)
+				c.logFunc.ProcessInfo("Skeep: " + pthzk + "/" + i)
 			}
 			c.zkcount.Inc("SKEEP")
 		}
@@ -148,5 +147,5 @@ func (c *CompareStruct) CompareZk(pth string) bool {
 }
 
 func (c *CompareStruct) ProcessInfo(logtext interface{}) {
-	c.logFunc("INFO", logtext)
+	c.logFunc.ProcessInfo(logtext)
 }

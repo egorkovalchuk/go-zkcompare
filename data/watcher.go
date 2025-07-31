@@ -11,13 +11,13 @@ import (
 type WatcherStruct struct {
 	sourcezk string
 	pathzk   string
-	logFunc  func(string, interface{})
+	logFunc  *LogWriter
 	srczkcon *zk.Conn
 	// Контроль горутин
 	wg sync.WaitGroup
 }
 
-func NewWatcher(sourcezk string, pthzk string, logFunc func(string, interface{})) *WatcherStruct {
+func NewWatcher(sourcezk string, pthzk string, logFunc *LogWriter) *WatcherStruct {
 	return &WatcherStruct{
 		sourcezk: sourcezk,
 		pathzk:   pthzk,
@@ -26,12 +26,12 @@ func NewWatcher(sourcezk string, pthzk string, logFunc func(string, interface{})
 }
 
 func (w *WatcherStruct) WatcherStart() {
-	w.logFunc("INFO", "Start watcher zk")
+	w.logFunc.ProcessInfo("Start watcher zk")
 	var err error
 	w.srczkcon, _, err = zk.Connect([]string{w.sourcezk}, time.Second*10)
 
 	if err != nil {
-		w.logFunc("PANIC", err)
+		w.logFunc.ProcessPanic(err)
 	}
 
 	// Канал для получения событий
